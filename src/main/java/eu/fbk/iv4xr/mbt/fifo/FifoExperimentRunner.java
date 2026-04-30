@@ -24,6 +24,16 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.stream.Collectors;
 
+/**
+ * Runner de experiment MBT pentru modelul FIFO.
+ *
+ * Ce face:
+ * 1) genereaza suite de teste abstracte din EFSM;
+ * 2) calculeaza metrici de coverage (stari, tranzitii, perechi de tranzitii);
+ * 3) ruleaza un oracle care verifica semantica FIFO;
+ * 4) compara MBT cu un baseline simplu random/manual;
+ * 5) exporta rezultate in CSV + Markdown pentru prezentare.
+ */
 public class FifoExperimentRunner {
 
     private static final DateTimeFormatter TS_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
@@ -32,23 +42,30 @@ public class FifoExperimentRunner {
     private static final int DEFAULT_MAX_STEPS_PER_TEST = 15;
 
     private static class GeneratedTestCase {
+        // Traseul abstract executat de model.
         List<String> transitions = new ArrayList<>();
         List<String> visitedStates = new ArrayList<>();
     }
 
     private static class RunStats {
+        // Seed-ul random pentru reproducibilitate.
         int seed;
+        // Marime suita generata.
         int generatedTests;
         int generatedSteps;
         double avgTestLength;
+        // Distributia actiunilor.
         int pushCount;
         int popCount;
+        // Metrici principale de coverage.
         double transitionCoverage;
         double stateCoverage;
         double transitionPairCoverage;
+        // Cazuri in care oracle-ul detecteaza defectul din SUT-ul buggy.
         int testsDetectingBug;
         int oracleChecks;
         int oracleFailuresOnCorrectSut;
+        // Curba de convergenta a coverage-ului pe pasi.
         List<Double> transitionCoverageConvergence = new ArrayList<>();
         Set<String> coveredTransitions = new HashSet<>();
         Set<String> coveredStates = new HashSet<>();
@@ -61,11 +78,16 @@ public class FifoExperimentRunner {
         POP
     }
 
+    /**
+     * Interfata comuna pentru implementari SUT.
+     * Ne permite sa comparam acelasi test pe varianta corecta vs buggy.
+     */
     private interface QueueSut {
         boolean enqueue(int value);
         Integer dequeue();
     }
 
+    // Implementarea corecta FIFO, folosita ca referinta in oracle.
     private static class CorrectFifoSut implements QueueSut {
         private final int capacity;
         private final Deque<Integer> queue = new ArrayDeque<>();
@@ -137,7 +159,9 @@ public class FifoExperimentRunner {
         List<Double> manualCoverages = new ArrayList<>();
         for (int i = 0; i < runs; i++) {
             int seed = 100 + i;
+            // Rulare MBT (model-guided).
             allRuns.add(executeRun(seed, testsPerRun, maxStepsPerTest, totalTransitions, totalStates, allTransitionPairs));
+            // Baseline simplu (alegeri random), pentru comparatie in raport.
             manualCoverages.add(runManualRandomBaseline(seed + 10_000, testsPerRun, maxStepsPerTest, totalTransitions));
         }
 
@@ -161,6 +185,12 @@ public class FifoExperimentRunner {
         System.out.println("Rezultate scrise in folderul results/.");
     }
 
+    /**
+     * Executa o rulare completa:
+     * - genereaza testele;
+     * - colecteaza metrici;
+     * - ruleaza oracle pe fiecare test.
+     */
     private static RunStats executeRun(
             int seed,
             int testsPerRun,
@@ -186,6 +216,7 @@ public class FifoExperimentRunner {
             for (int step = 0; step < maxStepsPerTest; step++) {
                 EFSMTransition chosen = pickFeasibleTransition(model, random);
                 if (chosen == null) {
+                    // Nu mai exista tranzitie fezabila din starea curenta.
                     break;
                 }
 
@@ -199,6 +230,7 @@ public class FifoExperimentRunner {
                 stats.coveredTransitions.add(transitionId);
                 stats.coveredStates.add(stateId);
                 if (previousTransitionId != null) {
+                    // Pair coverage: perechi de tranzitii consecutive.
                     stats.coveredTransitionPairs.add(previousTransitionId + "->" + transitionId);
                 }
                 previousTransitionId = transitionId;
@@ -218,6 +250,7 @@ public class FifoExperimentRunner {
             stats.oracleChecks += oracleResult.totalChecks;
             stats.oracleFailuresOnCorrectSut += oracleResult.correctSutFailures;
             if (oracleResult.bugDetected) {
+                // Numaram testele care surprind defectul introdus deliberat.
                 stats.testsDetectingBug++;
             }
         }
@@ -231,6 +264,10 @@ public class FifoExperimentRunner {
         return stats;
     }
 
+    /**
+     * Selecteaza o tranzitie fezabila din starea curenta.
+     * Returneaza null daca modelul este blocat.
+     */
     private static EFSMTransition pickFeasibleTransition(EFSM model, Random random) {
         EFSMState currentState = model.getConfiguration().getState();
         List<EFSMTransition> feasible = new ArrayList<>();
@@ -242,11 +279,17 @@ public class FifoExperimentRunner {
         if (feasible.isEmpty()) {
             return null;
         }
+        // Sortare pentru rezultate reproductibile intre rulari.
         feasible.sort(Comparator.comparing(EFSMTransition::getId));
         return feasible.get(random.nextInt(feasible.size()));
     }
 
+    /**
+     * Calculeaza universul perechilor de tranzitii consecutive posibile.
+     * Este denominator-ul pentru metrica Transition Pair Coverage.
+     */
     private static Set<String> computeAllTransitionPairs(EFSM model) {
+        // Multimea tuturor perechilor posibile T1->T2 din graful EFSM.
         Set<String> pairs = new HashSet<>();
         for (EFSMTransition t1 : model.getTransitons()) {
             EFSMState mid = t1.getTgt();
@@ -257,6 +300,12 @@ public class FifoExperimentRunner {
         return pairs;
     }
 
+    /**
+     * Ruleaza oracle-ul pentru un test abstract:
+     * - mentine o coada-oracol (comportament asteptat);
+     * - executa aceleasi actiuni pe SUT corect + SUT buggy;
+     * - raporteaza mismatch-uri.
+     */
     private static OracleResult executeOracleChecks(GeneratedTestCase testCase, int maxCapacity) {
         QueueSut correct = new CorrectFifoSut(maxCapacity);
         QueueSut buggy = new BuggyFifoSut(maxCapacity);
@@ -284,6 +333,7 @@ public class FifoExperimentRunner {
                     bugDetected = true;
                 }
             } else {
+                // Verificam explicit ordinea FIFO a valorilor extrase.
                 Integer expectedValue = oracleQueue.pollFirst();
                 Integer valueCorrect = correct.dequeue();
                 Integer valueBuggy = buggy.dequeue();
@@ -299,6 +349,9 @@ public class FifoExperimentRunner {
         return new OracleResult(totalChecks, correctFailures, bugDetected);
     }
 
+    /**
+     * Utilitar pentru comparatii Integer care pot fi null.
+     */
     private static boolean equalsNullable(Integer a, Integer b) {
         if (a == null) {
             return b == null;
@@ -306,6 +359,9 @@ public class FifoExperimentRunner {
         return a.equals(b);
     }
 
+    /**
+     * Rezumatul unei rulari de oracle pe un test.
+     */
     private static class OracleResult {
         private final int totalChecks;
         private final int correctSutFailures;
@@ -318,6 +374,10 @@ public class FifoExperimentRunner {
         }
     }
 
+    /**
+     * Baseline simplu random/manual:
+     * nu foloseste direct EFSM-ul pentru alegerea tranzitiilor, doar regula de marime.
+     */
     private static double runManualRandomBaseline(int seed, int testsPerRun, int maxStepsPerTest, int totalTransitions) {
         Random random = new Random(seed);
         int size = 0;
@@ -359,7 +419,11 @@ public class FifoExperimentRunner {
         return 100.0 * coveredTransitions.size() / totalTransitions;
     }
 
+    /**
+     * Export detaliat per rulare, bun pentru grafice externe.
+     */
     private static void writeCsv(Path path, List<RunStats> runs, List<Double> manualCoverages) throws IOException {
+        // CSV per rulare: util pentru grafice/tabele in prezentare.
         List<String> lines = new ArrayList<>();
         lines.add("seed,tests,steps,avg_test_len,push,pop,transition_coverage,state_coverage,pair_coverage,bug_detecting_tests,oracle_failures_correct_sut,manual_transition_coverage");
         for (int i = 0; i < runs.size(); i++) {
@@ -384,6 +448,9 @@ public class FifoExperimentRunner {
         Files.write(path, lines, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Export sinteza agregata in Markdown, folosita in raport/prezentare.
+     */
     private static void writeSummary(
             Path path,
             List<RunStats> runs,
@@ -449,6 +516,9 @@ public class FifoExperimentRunner {
         Files.write(path, summary, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Deviatie standard (populatie) pentru lista de valori.
+     */
     private static double stddev(List<Double> values) {
         if (values.isEmpty()) {
             return 0.0;
@@ -463,7 +533,11 @@ public class FifoExperimentRunner {
         return Math.sqrt(variance);
     }
 
+    /**
+     * Media punct-cu-punct pentru curbele de convergenta.
+     */
     private static List<Double> averageConvergence(List<RunStats> runs) {
+        // Media punct-cu-punct a curbelor de convergenta.
         List<Double> result = new ArrayList<>();
         int maxLen = 0;
         for (RunStats run : runs) {
